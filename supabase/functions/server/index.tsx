@@ -86,8 +86,45 @@ function safeProfile(account: Record<string, unknown>) {
   }
 }
 
+type AccountActivity = {
+  id: string
+  event: "account_created" | "signed_in"
+  createdAt: string
+  device: string
+}
+
 function normalizeUsername(value: unknown) {
   return typeof value === "string" ? value.trim().toLowerCase() : ""
+}
+
+function deviceCategory(userAgent: string) {
+  if (/tablet|ipad/i.test(userAgent)) return "Tablet"
+  if (/mobile|android|iphone/i.test(userAgent)) return "Mobile"
+  return "Desktop"
+}
+
+async function recordAccountActivity(
+  c: any,
+  username: string,
+  event: AccountActivity["event"],
+) {
+  try {
+    const key = `auth:activity:${username}`
+    const current = await kv.get(key)
+    const activity: AccountActivity[] = Array.isArray(current) ? current : []
+    activity.unshift({
+      id: crypto.randomUUID(),
+      event,
+      createdAt: new Date().toISOString(),
+      device: deviceCategory(c.req.header("user-agent") ?? ""),
+    })
+    await kv.set(key, activity.slice(0, 10))
+  } catch (error) {
+    console.error(
+      "Unable to record account activity",
+      error instanceof Error ? error.message : "Unknown error",
+    )
+  }
 }
 
 async function createSession(c: any, account: Record<string, unknown>) {
@@ -181,6 +218,7 @@ app.post("/make-server-61bf5cd2/auth/register", async (c) => {
     if (error) throw new Error(error.message)
 
     await createSession(c, account)
+    await recordAccountActivity(c, username, "account_created")
     return c.json({ profile: safeProfile(account) }, 201)
   } catch (error) {
     console.error(
@@ -208,6 +246,7 @@ app.post("/make-server-61bf5cd2/auth/login", async (c) => {
     }
 
     await createSession(c, account)
+    await recordAccountActivity(c, username, "signed_in")
     return c.json({ profile: safeProfile(account) })
   } catch (error) {
     console.error(
@@ -229,6 +268,22 @@ app.get("/make-server-61bf5cd2/auth/me", async (c) => {
       error instanceof Error ? error.message : "Unknown error",
     )
     return c.json({ error: "Unable to load the farmer profile." }, 500)
+  }
+})
+
+app.get("/make-server-61bf5cd2/auth/activity", async (c) => {
+  try {
+    const account = await currentAccount(c)
+    if (!account) return c.json({ error: "No active session." }, 401)
+
+    const activity = await kv.get(`auth:activity:${account.username}`)
+    return c.json({ activity: Array.isArray(activity) ? activity : [] })
+  } catch (error) {
+    console.error(
+      "Account activity error",
+      error instanceof Error ? error.message : "Unknown error",
+    )
+    return c.json({ error: "Unable to load account activity." }, 500)
   }
 })
 
@@ -283,10 +338,16 @@ app.post("/make-server-61bf5cd2/auth/logout", async (c) => {
   }
 })
 
-const systemInstruction = `You are Cultiva AI, an expert enterprise agronomist and crop specialist for Cultiva Health.
-Give specific, practical guidance for the farmer's exact crop issue. Never use a generic template response.
+const systemInstruction = `You are Cultiva AI, a warm, emotionally intelligent assistant and expert enterprise agronomist for Cultiva Health.
+Talk naturally. Acknowledge the farmer's feelings when they express worry, frustration, excitement, or uncertainty, without being dramatic or claiming human emotions. Be friendly, calm, concise, and never robotic.
 
-For every response:
+Classify the request:
+- For greetings, thanks, casual conversation, questions about your capabilities, or non-diagnostic follow-ups, use responseType "conversation". Give a natural answer in message and leave the agronomy-only fields empty.
+- For crop, soil, pest, irrigation, weather-risk, or farm-management questions, use responseType "agronomy". Give a helpful natural introduction in message and complete every agronomy field.
+
+For agronomy responses, give specific, practical guidance for the farmer's exact issue. Never use a generic template response.
+
+For every agronomy response:
 - Explain symptom patterns and the most likely causes without overstating certainty.
 - Give concrete field checks that help distinguish between likely causes.
 - Give separate immediate organic and chemical actions. If no chemical is appropriate, say so clearly.
@@ -302,13 +363,17 @@ Return only valid JSON matching the requested schema.`
 const responseSchema = {
   type: "OBJECT",
   properties: {
+    responseType: {
+      type: "STRING",
+      enum: ["conversation", "agronomy"],
+    },
+    message: { type: "STRING" },
     diagnosis: { type: "STRING" },
     summary: { type: "STRING" },
     urgency: { type: "STRING" },
     checks: {
       type: "ARRAY",
       items: { type: "STRING" },
-      minItems: 3,
       maxItems: 4,
     },
     organic: { type: "STRING" },
@@ -316,11 +381,12 @@ const responseSchema = {
     prevention: {
       type: "ARRAY",
       items: { type: "STRING" },
-      minItems: 3,
       maxItems: 4,
     },
   },
   required: [
+    "responseType",
+    "message",
     "diagnosis",
     "summary",
     "urgency",
@@ -360,6 +426,24 @@ app.post("/make-server-61bf5cd2/agronomy/chat", async (c) => {
       parts.push({ inlineData: { mimeType, data } })
     }
 
+    const history = Array.isArray(body.history)
+      ? body.history
+          .slice(-8)
+          .filter(
+            (entry: unknown) =>
+              typeof entry === "object" &&
+              entry !== null &&
+              ["user", "model"].includes(
+                (entry as Record<string, unknown>).role as string,
+              ) &&
+              typeof (entry as Record<string, unknown>).text === "string",
+          )
+          .map((entry: Record<string, unknown>) => ({
+            role: entry.role,
+            parts: [{ text: String(entry.text).slice(0, 3000) }],
+          }))
+      : []
+
     const geminiResponse = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
       {
@@ -370,9 +454,9 @@ app.post("/make-server-61bf5cd2/agronomy/chat", async (c) => {
         },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: systemInstruction }] },
-          contents: [{ role: "user", parts }],
+          contents: [...history, { role: "user", parts }],
           generationConfig: {
-            temperature: 0.25,
+            temperature: 0.55,
             responseMimeType: "application/json",
             responseSchema,
           },
@@ -395,17 +479,26 @@ app.post("/make-server-61bf5cd2/agronomy/chat", async (c) => {
     }
 
     const advice = JSON.parse(responseText)
-    const requiredStrings = [
+    const isConversation =
+      advice.responseType === "conversation" &&
+      typeof advice.message === "string" &&
+      advice.message.trim().length > 0
+    const requiredAgronomyStrings = [
+      "message",
       "diagnosis",
       "summary",
       "urgency",
       "organic",
       "chemical",
     ]
-    const isValid =
-      requiredStrings.every((field) => typeof advice[field] === "string") &&
+    const isAgronomy =
+      advice.responseType === "agronomy" &&
+      requiredAgronomyStrings.every(
+        (field) => typeof advice[field] === "string",
+      ) &&
       Array.isArray(advice.checks) &&
       Array.isArray(advice.prevention)
+    const isValid = isConversation || isAgronomy
     if (!isValid) {
       return c.json(
         { error: "Agronomy analysis returned an invalid result" },

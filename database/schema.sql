@@ -33,6 +33,19 @@ CREATE TABLE farmer_sessions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TYPE login_event_type AS ENUM (
+  'account_created',
+  'signed_in'
+);
+
+CREATE TABLE login_activity (
+  activity_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  event_type login_event_type NOT NULL,
+  device_category VARCHAR(32) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE farms (
   farm_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -76,6 +89,9 @@ CREATE INDEX farmer_sessions_user_id_idx
 
 CREATE INDEX farmer_sessions_expires_at_idx
   ON farmer_sessions(expires_at);
+
+CREATE INDEX login_activity_user_created_at_idx
+  ON login_activity(user_id, created_at DESC);
 
 CREATE INDEX ai_diagnoses_user_created_at_idx
   ON ai_diagnoses(user_id, created_at DESC);

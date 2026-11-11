@@ -337,6 +337,18 @@ const schemaTables = [
     ],
   },
   {
+    name: "login_activity",
+    icon: "shield" as IconName,
+    description: "Privacy-safe account access history",
+    fields: [
+      ["activity_id", "UUID", "PK"],
+      ["user_id", "UUID", "FK"],
+      ["event_type", "LOGIN_EVENT", ""],
+      ["device_category", "VARCHAR", ""],
+      ["created_at", "TIMESTAMP", ""],
+    ],
+  },
+  {
     name: "farms",
     icon: "sprout" as IconName,
     description: "Managed land plots and crop context",
@@ -416,6 +428,8 @@ const architectureSteps = [
 ]
 
 type AgronomyAdvice = {
+  responseType?: "conversation" | "agronomy"
+  message?: string
   diagnosis: string
   summary: string
   urgency: string
@@ -460,15 +474,29 @@ function fileToImagePayload(file: File): Promise<ImagePayload> {
 async function requestAgronomyAdvice(
   query: string,
   image: File | null,
+  history: ChatEntry[],
 ): Promise<AgronomyAdvice> {
   const imagePayload = image ? await fileToImagePayload(image) : undefined
+  const conversationHistory = history
+    .filter((entry) => entry.status !== "loading" && entry.advice)
+    .flatMap((entry) => [
+      { role: "user", text: entry.query },
+      {
+        role: "model",
+        text: entry.advice?.message || entry.advice?.summary || "",
+      },
+    ])
   const response = await fetch(`${apiBase}/agronomy/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${publicAnonKey}`,
     },
-    body: JSON.stringify({ query, image: imagePayload }),
+    body: JSON.stringify({
+      query,
+      image: imagePayload,
+      history: conversationHistory,
+    }),
   })
 
   if (!response.ok) {
@@ -491,10 +519,18 @@ type FarmerProfile = {
   createdAt: string
 }
 
-async function authRequest(
-  path: string,
-  options: RequestInit = {},
-): Promise<{ profile?: FarmerProfile success?: boolean }> {
+type AccountActivity = {
+  id: string
+  event: "account_created" | "signed_in"
+  createdAt: string
+  device: string
+}
+
+async function authRequest(path: string, options: RequestInit = {}): Promise<{
+  profile?: FarmerProfile
+  activity?: AccountActivity[]
+  success?: boolean
+}> {
   const response = await fetch(`${apiBase}${path}`, {
     ...options,
     credentials: "include",
@@ -504,9 +540,23 @@ async function authRequest(
       ...options.headers,
     },
   })
-  const result = await response.json()
+  const responseText = await response.text()
+  const result = responseText
+    ? (() => {
+        try {
+          return JSON.parse(responseText)
+        } catch {
+          return {}
+        }
+      })()
+    : {}
   if (!response.ok) {
-    throw new Error(result.error || "Account request failed.")
+    throw new Error(
+      result.error ||
+        (response.status === 404
+          ? "Account service needs to be deployed from Make settings."
+          : "Account service is temporarily unavailable."),
+    )
   }
   return result
 }
@@ -697,8 +747,21 @@ function getAgronomyAdvice(query: string): AgronomyAdvice {
 }
 
 function AgronomyResponse({ advice }: { advice: AgronomyAdvice }) {
+  if (advice.responseType === "conversation") {
+    return (
+      <div className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm leading-6 text-slate">
+        {advice.message}
+      </div>
+    )
+  }
+
   return (
     <div className="min-w-0 flex-1">
+      {advice.message && (
+        <p className="mb-3 rounded-xl bg-mint-pale px-4 py-3 text-sm leading-6 text-forest">
+          {advice.message}
+        </p>
+      )}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-semibold text-slate">{advice.diagnosis}</p>
         <span className="rounded-full bg-amber-pale px-2.5 py-1 text-tiny font-bold uppercase text-amber">
@@ -760,6 +823,14 @@ function AuthModal({
   const [location, setLocation] = useState("")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const [activity, setActivity] = useState<AccountActivity[]>([])
+
+  useEffect(() => {
+    if (mode !== "profile" || !profile) return
+    authRequest("/auth/activity")
+      .then((result) => setActivity(result.activity ?? []))
+      .catch(() => setActivity([]))
+  }, [mode, profile])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -797,7 +868,7 @@ function AuthModal({
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="w-full max-w-md overflow-hidden rounded-dashboard border border-white/30 bg-white shadow-hero">
+      <div className="max-h-full w-full max-w-md overflow-y-auto rounded-dashboard border border-white/30 bg-white shadow-hero">
         <div className="flex items-center justify-between border-b border-line px-6 py-5">
           <Logo />
           <button
@@ -848,6 +919,54 @@ function AuthModal({
                   }).format(new Date(profile.createdAt))}
                 </span>
               </div>
+            </div>
+            <div className="mt-6">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-slate">
+                  Recent account activity
+                </p>
+                <span className="flex items-center gap-1.5 text-tiny font-semibold uppercase tracking-wide text-emerald">
+                  <Icon name="shield" size={13} /> Protected
+                </span>
+              </div>
+              <div className="mt-3 overflow-hidden rounded-2xl border border-line">
+                {activity.length > 0 ? (
+                  <div className="divide-y divide-line bg-white">
+                    {activity.slice(0, 4).map((item) => (
+                      <div
+                        key={item.id}
+                        className="grid grid-cols-[1fr_auto] items-center gap-3 px-4 py-3"
+                      >
+                        <div>
+                          <p className="text-xs font-semibold text-slate">
+                            {item.event === "account_created"
+                              ? "Account created"
+                              : "Successful sign in"}
+                          </p>
+                          <p className="mt-1 text-tiny text-muted">
+                            {item.device} ·{" "}
+                            {new Intl.DateTimeFormat("en", {
+                              month: "short",
+                              day: "numeric",
+                              hour: "numeric",
+                              minute: "2-digit",
+                            }).format(new Date(item.createdAt))}
+                          </p>
+                        </div>
+                        <span className="h-2 w-2 rounded-full bg-emerald" />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="bg-white px-4 py-4 text-xs text-muted">
+                    Activity will appear after your next sign in.
+                  </p>
+                )}
+              </div>
+              <p className="mt-2 text-tiny leading-4 text-muted">
+                Passwords, session tokens, and precise device details are never
+                shown here.
+              </p>
             </div>
             <div className="mt-6 flex gap-3">
               <Button variant="secondary" className="flex-1" onClick={onClose}>
@@ -1034,7 +1153,7 @@ export default function App() {
     setMessage("")
 
     try {
-      const advice = await requestAgronomyAdvice(query, selectedFile)
+      const advice = await requestAgronomyAdvice(query, selectedFile, messages)
       setMessages((current) =>
         current.map((entry) =>
           entry.id === id ? { ...entry, advice, status: "success" } : entry,
@@ -1724,6 +1843,10 @@ export default function App() {
               <span className="flex items-center gap-2">
                 <span className="h-2 w-2 rounded-full bg-emerald" />
                 users <Icon name="arrow" size={13} /> farms
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-mint" />
+                users <Icon name="arrow" size={13} /> login_activity
               </span>
               <span className="flex items-center gap-2">
                 <span className="h-2 w-2 rounded-full bg-sky" />
