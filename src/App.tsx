@@ -1,5 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useRef, useState } from "react"
+import { FormEvent, ReactNode, useEffect, useState } from "react"
 import { projectId, publicAnonKey } from "../utils/supabase/info"
+import {
+  agricultureQuestionBank,
+  findAgricultureAnswer,
+} from "./agricultureQuestionBank"
 
 const apiBase = `https://${projectId}.supabase.co/functions/v1/make-server-61bf5cd2`
 
@@ -443,71 +447,47 @@ type ChatEntry = {
   id: string
   query: string
   advice?: AgronomyAdvice
-  status: "loading" | "success" | "fallback"
+  status: "loading" | "knowledge" | "not-found"
 }
 
-type ImagePayload = {
-  mimeType: string
-  data: string
-}
-
-function fileToImagePayload(file: File): Promise<ImagePayload> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : ""
-      const [metadata, data] = result.split(",", 2)
-      if (!metadata || !data) {
-        reject(new Error("Unable to read image"))
-        return
-      }
-      resolve({
-        mimeType: file.type,
-        data,
-      })
-    }
-    reader.onerror = () => reject(new Error("Unable to read image"))
-    reader.readAsDataURL(file)
-  })
-}
-
-async function requestAgronomyAdvice(
+function getQuestionBankAdvice(
   query: string,
-  image: File | null,
-  history: ChatEntry[],
-): Promise<AgronomyAdvice> {
-  const imagePayload = image ? await fileToImagePayload(image) : undefined
-  const conversationHistory = history
-    .filter((entry) => entry.status !== "loading" && entry.advice)
-    .flatMap((entry) => [
-      { role: "user", text: entry.query },
-      {
-        role: "model",
-        text: entry.advice?.message || entry.advice?.summary || "",
+): {
+  advice: AgronomyAdvice
+  matched: boolean
+} {
+  const match = findAgricultureAnswer(query)
+  if (match) {
+    return {
+      matched: true,
+      advice: {
+        responseType: "conversation",
+        message: match.answer,
+        diagnosis: "",
+        summary: "",
+        urgency: "",
+        checks: [],
+        organic: "",
+        chemical: "",
+        prevention: [],
       },
-    ])
-  const response = await fetch(`${apiBase}/agronomy/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${publicAnonKey}`,
+    }
+  }
+
+  return {
+    matched: false,
+    advice: {
+      responseType: "conversation",
+      message: `I couldn't find that in the fixed Agriculture Judge bank yet. Try asking a direct question about agriculture fundamentals, Indian agriculture, soil science, soil chemistry, plant nutrition, water management, irrigation, or plant biology. The current library contains ${agricultureQuestionBank.length} reviewed answers.`,
+      diagnosis: "",
+      summary: "",
+      urgency: "",
+      checks: [],
+      organic: "",
+      chemical: "",
+      prevention: [],
     },
-    body: JSON.stringify({
-      query,
-      image: imagePayload,
-      history: conversationHistory,
-    }),
-  })
-
-  if (!response.ok) {
-    throw new Error("Agronomy analysis failed")
   }
-
-  const result = await response.json()
-  if (!result.advice) {
-    throw new Error("Agronomy analysis returned no advice")
-  }
-  return result.advice as AgronomyAdvice
 }
 
 type FarmerProfile = {
@@ -1117,11 +1097,8 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [authMode, setAuthMode] = useState<AuthMode | null>(null)
   const [profile, setProfile] = useState<FarmerProfile | null>(null)
-  const [fileName, setFileName] = useState("")
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [message, setMessage] = useState("")
   const [messages, setMessages] = useState<ChatEntry[]>([])
-  const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     authRequest("/auth/me")
@@ -1142,36 +1119,22 @@ export default function App() {
     }
   }
 
-  const submitMessage = async (event: FormEvent) => {
+  const submitMessage = (event: FormEvent) => {
     event.preventDefault()
-    if (!message.trim() && !selectedFile) return
-    const query =
-      message.trim() ||
-      "Please diagnose the visible crop symptoms in this uploaded image."
+    const query = message.trim()
+    if (!query) return
     const id = crypto.randomUUID()
-    setMessages((current) => [...current, { id, query, status: "loading" }])
+    const { advice, matched } = getQuestionBankAdvice(query)
+    setMessages((current) => [
+      ...current,
+      {
+        id,
+        query,
+        advice,
+        status: matched ? "knowledge" : "not-found",
+      },
+    ])
     setMessage("")
-
-    try {
-      const advice = await requestAgronomyAdvice(query, selectedFile, messages)
-      setMessages((current) =>
-        current.map((entry) =>
-          entry.id === id ? { ...entry, advice, status: "success" } : entry,
-        ),
-      )
-    } catch {
-      setMessages((current) =>
-        current.map((entry) =>
-          entry.id === id
-            ? {
-                ...entry,
-                advice: getAgronomyAdvice(query),
-                status: "fallback",
-              }
-            : entry,
-        ),
-      )
-    }
   }
 
   const usePrompt = (prompt: string) => {
@@ -1435,15 +1398,15 @@ export default function App() {
         >
           <div className="mx-auto max-w-3xl text-center">
             <p className="eyebrow">
-              <Icon name="sparkles" size={15} /> MEET CULTIVA AI
+              <Icon name="book" size={15} /> AGRICULTURE JUDGE
             </p>
             <h2 className="mt-5 text-4xl font-semibold tracking-tight text-forest sm:text-5xl">
-              From field question to confident action.
+              Reviewed agriculture answers, instantly.
             </h2>
             <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-muted">
-              Upload a crop image or describe what you’re seeing. Cultiva AI
-              combines visual diagnostics, local conditions, and agronomic best
-              practices into one clear recommendation.
+              Study 200 fixed questions across agriculture fundamentals, Indian
+              agriculture, soil science, nutrition, irrigation, and plant
+              biology. No external AI service is used in this mode.
             </p>
           </div>
 
@@ -1458,11 +1421,11 @@ export default function App() {
                 </span>
                 <div>
                   <h3 className="text-sm font-semibold text-slate">
-                    Cultiva AI Crop Doctor
+                    Agriculture Judge Answer Desk
                   </h3>
                   <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald" />{" "}
-                    Online · Agronomy model v4.2
+                    Offline · 200 reviewed answers
                   </p>
                 </div>
               </div>
@@ -1471,7 +1434,7 @@ export default function App() {
                   English (US)
                 </span>
                 <span className="rounded-lg border border-line px-3 py-2 text-xs font-medium text-slate">
-                  New diagnosis
+                  Fixed answer mode
                 </span>
               </div>
             </div>
@@ -1480,90 +1443,65 @@ export default function App() {
               <aside className="border-b border-line bg-surface/70 p-5 lg:border-b-0 lg:border-r lg:p-6">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-slate">
-                    Plant scan
+                    Question library
                   </h3>
                   <span className="text-xs font-medium text-muted">
-                    Step 1 of 2
+                    8 sections
                   </span>
                 </div>
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept="image/*"
-                  className="sr-only"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0] ?? null
-                    if (file && file.size > 4_000_000) {
-                      setFileName("")
-                      setSelectedFile(null)
-                      event.target.value = ""
-                      return
-                    }
-                    setFileName(file?.name ?? "")
-                    setSelectedFile(file)
-                  }}
-                />
-                <button
-                  onClick={() => fileRef.current?.click()}
-                  className={`mt-4 flex w-full flex-col items-center rounded-2xl border border-dashed p-7 text-center transition-colors ${
-                    fileName
-                      ? "border-emerald bg-mint-pale"
-                      : "border-line-strong bg-white hover:border-emerald hover:bg-mint-pale/50"
-                  }`}
-                >
-                  <span className="grid h-12 w-12 place-items-center rounded-xl bg-mint-pale text-emerald">
-                    <Icon name={fileName ? "check" : "upload"} size={22} />
-                  </span>
-                  <strong className="mt-4 text-sm font-semibold text-slate">
-                    {fileName || "Upload a crop photo"}
-                  </strong>
-                  <span className="mt-1.5 text-xs leading-5 text-muted">
-                    {fileName
-                      ? "Image ready for diagnosis"
-                      : "Drag and drop or browse your device"}
-                  </span>
-                  {!fileName && (
-                    <span className="mt-4 rounded-lg border border-line bg-white px-3 py-2 text-xs font-semibold text-forest shadow-sm">
-                      Choose image
+                <div className="mt-4 rounded-2xl border border-line bg-white p-5">
+                  <div className="flex items-end justify-between">
+                    <div>
+                      <p className="text-3xl font-semibold tracking-tight text-forest">
+                        {agricultureQuestionBank.length}
+                      </p>
+                      <p className="mt-1 text-xs text-muted">
+                        Fixed Q&amp;A pairs
+                      </p>
+                    </div>
+                    <span className="grid h-11 w-11 place-items-center rounded-xl bg-mint-pale text-emerald">
+                      <Icon name="book" size={20} />
                     </span>
-                  )}
-                </button>
-                <button
-                  onClick={() => fileRef.current?.click()}
-                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-line bg-white py-3 text-xs font-semibold text-slate transition-colors hover:bg-mint-pale"
-                >
-                  <Icon name="camera" size={17} className="text-emerald" /> Use
-                  device camera
-                </button>
-
+                  </div>
+                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-surface">
+                    <div className="h-full w-full rounded-full bg-emerald" />
+                  </div>
+                  <p className="mt-2 text-tiny font-semibold uppercase tracking-wide text-emerald">
+                    Answer edition loaded
+                  </p>
+                </div>
                 <div className="my-6 h-px bg-line" />
                 <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-                  Scan tips
+                  Covered subjects
                 </p>
-                <ul className="mt-4 space-y-3">
+                <ul className="mt-4 space-y-2">
                   {[
-                    "Use natural, even lighting",
-                    "Focus on the affected area",
-                    "Include the full leaf or fruit",
-                  ].map((tip) => (
+                    "Agriculture fundamentals",
+                    "Indian agriculture",
+                    "Soil science & chemistry",
+                    "Plant nutrition",
+                    "Water & irrigation",
+                    "Plant biology",
+                  ].map((subject) => (
                     <li
-                      key={tip}
-                      className="flex items-start gap-2 text-xs leading-5 text-muted"
+                      key={subject}
+                      className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-muted"
                     >
-                      <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-mint-pale text-emerald">
+                      <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-mint-pale text-emerald">
                         <Icon name="check" size={10} />
                       </span>
-                      {tip}
+                      {subject}
                     </li>
                   ))}
                 </ul>
-                <div className="mt-6 flex items-center gap-2 rounded-xl bg-white p-3 text-xs text-muted">
+                <div className="mt-6 flex items-start gap-2 rounded-xl bg-white p-3 text-xs leading-5 text-muted">
                   <Icon
                     name="shield"
                     size={18}
                     className="shrink-0 text-emerald"
                   />{" "}
-                  Images are private and securely processed.
+                  Questions stay in your browser. This mode makes no Gemini or
+                  external AI request.
                 </div>
               </aside>
 
@@ -1575,15 +1513,15 @@ export default function App() {
                     </span>
                     <div>
                       <div className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm leading-6 text-slate">
-                        Good morning! I’m your Cultiva AI agronomist. Upload a
-                        crop photo or tell me what’s happening in your field,
-                        and I’ll help you diagnose it.
+                        Welcome to the Agriculture Judge Answer Desk. Ask one of
+                        the 200 study questions and I’ll return its reviewed,
+                        fixed answer instantly.
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">
                         {[
-                          "Why are my tomato leaves curling?",
-                          "Plan my irrigation schedule",
-                          "Check for nutrient deficiency",
+                          "What is sustainable agriculture?",
+                          "What are Kharif crops?",
+                          "What is soil pH?",
                         ].map((prompt) => (
                           <button
                             key={prompt}
@@ -1598,81 +1536,23 @@ export default function App() {
                   </div>
 
                   <div className="ml-auto max-w-xl rounded-2xl rounded-tr-sm bg-forest px-4 py-3 text-sm leading-6 text-white">
-                    My tomato plants have brown spots with yellow edges. It
-                    started after several humid days. What could it be?
+                    What is agriculture?
                   </div>
 
                   <div className="flex max-w-4xl gap-3">
                     <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-forest text-white">
-                      <Icon name="sparkles" size={15} />
+                      <Icon name="book" size={15} />
                     </span>
                     <div className="min-w-0 flex-1">
-                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-sm font-semibold text-slate">
-                          Analysis complete
-                        </p>
+                      <div className="mb-2 flex justify-end">
                         <span className="rounded-full bg-mint-pale px-2.5 py-1 text-tiny font-bold text-emerald">
-                          91% CONFIDENCE
+                          QUESTION 01 · FIXED ANSWER
                         </span>
                       </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <DiagnosisCard icon="scan" label="Problem identified">
-                          <strong className="font-semibold">
-                            Early blight
-                          </strong>
-                          <p className="mt-1 text-muted">
-                            Likely caused by <em>Alternaria solani</em>, favored
-                            by warm, humid conditions.
-                          </p>
-                        </DiagnosisCard>
-                        <DiagnosisCard
-                          icon="warning"
-                          label="Severity level"
-                          accent="amber"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="h-2 w-2 rounded-full bg-amber" />
-                            <strong className="font-semibold">
-                              Moderate · Act within 48h
-                            </strong>
-                          </div>
-                          <p className="mt-1 text-muted">
-                            Currently affecting lower foliage.
-                          </p>
-                        </DiagnosisCard>
-                        <DiagnosisCard
-                          icon="sprout"
-                          label="Recommended treatment"
-                        >
-                          <p>
-                            <strong className="font-semibold text-emerald">
-                              Organic:
-                            </strong>{" "}
-                            Remove affected leaves and apply copper-based
-                            fungicide.
-                          </p>
-                          <p className="mt-2">
-                            <strong className="font-semibold text-sky">
-                              Chemical:
-                            </strong>{" "}
-                            Apply chlorothalonil per local label guidance.
-                          </p>
-                        </DiagnosisCard>
-                        <DiagnosisCard
-                          icon="shield"
-                          label="Preventative measures"
-                          accent="blue"
-                        >
-                          <ul className="space-y-1 text-muted">
-                            <li>• Water at the soil line early morning</li>
-                            <li>• Improve airflow between plants</li>
-                            <li>• Rotate nightshade crops next season</li>
-                          </ul>
-                        </DiagnosisCard>
-                      </div>
-                      <p className="mt-3 text-xs text-muted">
-                        Recommendations are based on your region and reported
-                        field conditions. Always follow local product labels.
+                      <p className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm leading-6 text-slate">
+                        Agriculture is the science, art and practice of
+                        cultivating soil, growing crops, raising livestock and
+                        producing food, fibre and other useful products.
                       </p>
                     </div>
                   </div>
@@ -1684,7 +1564,7 @@ export default function App() {
                       </div>
                       <div className="flex max-w-4xl gap-3">
                         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-forest text-white">
-                          <Icon name="sparkles" size={15} />
+                          <Icon name="book" size={15} />
                         </span>
                         {entry.status === "loading" ? (
                           <div className="flex items-center gap-3 rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm text-muted">
@@ -1693,21 +1573,21 @@ export default function App() {
                               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald [animation-delay:150ms]" />
                               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald [animation-delay:300ms]" />
                             </span>
-                            Analyzing crop evidence and agronomy guidance…
+                            Searching the local answer bank…
                           </div>
                         ) : (
                           <div className="min-w-0 flex-1">
                             <div className="mb-2 flex justify-end">
                               <span
                                 className={`rounded-full px-2.5 py-1 text-tiny font-bold uppercase ${
-                                  entry.status === "success"
+                                  entry.status === "knowledge"
                                     ? "bg-mint-pale text-emerald"
                                     : "bg-amber-pale text-amber"
                                 }`}
                               >
-                                {entry.status === "success"
-                                  ? "Gemini analysis"
-                                  : "Offline agronomy guidance"}
+                                {entry.status === "knowledge"
+                                  ? "Fixed answer"
+                                  : "Not in question bank"}
                               </span>
                             </div>
                             <AgronomyResponse advice={entry.advice!} />
@@ -1723,14 +1603,6 @@ export default function App() {
                     onSubmit={submitMessage}
                     className="flex items-end gap-2 rounded-2xl border border-line bg-surface p-2 focus-within:border-emerald focus-within:ring-4 focus-within:ring-emerald/10"
                   >
-                    <button
-                      type="button"
-                      onClick={() => fileRef.current?.click()}
-                      className="grid h-10 w-10 shrink-0 place-items-center rounded-xl text-muted transition-colors hover:bg-white hover:text-forest"
-                      aria-label="Attach image"
-                    >
-                      <Icon name="paperclip" size={19} />
-                    </button>
                     <textarea
                       value={message}
                       onChange={(event) => setMessage(event.target.value)}
@@ -1741,16 +1613,9 @@ export default function App() {
                         }
                       }}
                       rows={1}
-                      placeholder="Ask about your crops, soil, pests, or irrigation…"
+                      placeholder="Ask an Agriculture Judge question…"
                       className="max-h-32 min-h-10 flex-1 resize-none bg-transparent px-1 py-2.5 text-sm text-slate outline-none placeholder:text-muted"
                     />
-                    <button
-                      type="button"
-                      className="grid h-10 w-10 shrink-0 place-items-center rounded-xl text-muted transition-colors hover:bg-white hover:text-forest"
-                      aria-label="Use voice input"
-                    >
-                      <Icon name="mic" size={19} />
-                    </button>
                     <button
                       type="submit"
                       className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-forest text-white shadow-sm transition-colors hover:bg-forest-light"
@@ -1760,8 +1625,8 @@ export default function App() {
                     </button>
                   </form>
                   <p className="mt-2 text-center text-tiny text-muted">
-                    Cultiva AI can make mistakes. Verify critical advice with a
-                    local agronomist.
+                    Fixed study content · No API call · Questions remain on this
+                    device
                   </p>
                 </div>
               </div>
